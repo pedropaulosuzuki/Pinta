@@ -19,7 +19,7 @@ public sealed class GaussianBlurEffect : BaseEffect
 {
 	public override string Icon => Resources.Icons.EffectsBlursGaussianBlur;
 
-	public sealed override bool IsTileable => true;
+	public sealed override bool IsTileable => false;
 
 	public override string Name => Translations.GetString ("Gaussian Blur");
 
@@ -58,185 +58,94 @@ public sealed class GaussianBlurEffect : BaseEffect
 		return weights.MoveToImmutable ();
 	}
 
-	public override void Render (ImageSurface src, ImageSurface dest, ReadOnlySpan<RectangleI> rois)
+	public override void Render (ImageSurface src, ImageSurface output, ReadOnlySpan<RectangleI> rois)
 	{
 		if (Data.Radius == 0)
-			return; // Copy src to dest
+			return; // Copy src to output
 
-		int r = Data.Radius;
-		ImmutableArray<int> w = CreateGaussianBlurRow (r);
-		int wlen = w.Length;
+		int radius = Data.Radius;
+		ImmutableArray<int> weights = CreateGaussianBlurRow (radius);
+		int weights_length = weights.Length;
 
-		Span<long> waSums = stackalloc long[wlen];
-		Span<long> wcSums = stackalloc long[wlen];
-		Span<long> aSums = stackalloc long[wlen];
-		Span<long> bSums = stackalloc long[wlen];
-		Span<long> gSums = stackalloc long[wlen];
-		Span<long> rSums = stackalloc long[wlen];
-
-		// Cache these for a massive performance boost
 		int src_width = src.Width;
 		int src_height = src.Height;
 		ReadOnlySpan<ColorBgra> src_data = src.GetReadOnlyPixelData ();
-		Span<ColorBgra> dst_data = dest.GetPixelData ();
+		Span<ColorBgra> output_data = output.GetPixelData ();
 
-		foreach (var rect in rois) {
+		// Blur vertically
+		for (int y = 0; y < src_height; y++) {
+			for (int x = 0; x < src_width; x++) {
+				long red_sum = 0;
+				long green_sum = 0;
+				long blue_sum = 0;
+				long alpha_sum = 0;
+				long weights_sum = 0;
 
-			if (rect.Height < 1 || rect.Width < 1)
-				continue;
+				for (int i = 0; i < weights_length; i++) {
+					int pos = y - radius + i;
+					if (pos < 0 || pos >= src_height) { continue; }
 
-			for (int y = rect.Top; y <= rect.Bottom; ++y) {
-				long waSum = 0;
-				long wcSum = 0;
-				long aSum = 0;
-				long bSum = 0;
-				long gSum = 0;
-				long rSum = 0;
+					var pixel = output_data[pos * src_width + x];
 
-				var dst_row = dst_data.Slice (y * src_width, src_width);
-
-				for (int wx = 0; wx < wlen; ++wx) {
-					int srcX = rect.Left + wx - r;
-					waSums[wx] = 0;
-					wcSums[wx] = 0;
-					aSums[wx] = 0;
-					bSums[wx] = 0;
-					gSums[wx] = 0;
-					rSums[wx] = 0;
-
-					if (srcX < 0 || srcX >= src_width)
-						continue;
-
-					for (int wy = 0; wy < wlen; ++wy) {
-						int srcY = y + wy - r;
-
-						if (srcY < 0 || srcY >= src_height)
-							continue;
-
-						PointI pixelPosition = new (srcX, srcY);
-
-						ColorBgra c = src.GetColorBgra (src_data, src_width, pixelPosition).ToStraightAlpha ();
-						int wp = w[wy];
-
-						waSums[wx] += wp;
-						wp *= c.A + (c.A >> 7);
-						wcSums[wx] += wp;
-						wp >>= 8;
-
-						if (c.A > 0) {
-							aSums[wx] += wp * c.A;
-							bSums[wx] += wp * c.B;
-							gSums[wx] += wp * c.G;
-							rSums[wx] += wp * c.R;
-						}
-					}
-
-					int wwx = w[wx];
-					waSum += wwx * waSums[wx];
-					wcSum += wwx * wcSums[wx];
-					aSum += wwx * aSums[wx];
-					bSum += wwx * bSums[wx];
-					gSum += wwx * gSums[wx];
-					rSum += wwx * rSums[wx];
+					red_sum += weights[i] * (long) pixel.R;
+					green_sum += weights[i] * (long) pixel.G;
+					blue_sum += weights[i] * (long) pixel.B;
+					alpha_sum += weights[i] * (long) pixel.A;
+					weights_sum += (long) weights[i];
 				}
 
-				wcSum >>= 8;
+				output_data[y * src_width + x] = ColorBgra.FromBgra (
+					(byte) (weights_sum == 0 ? 0 : blue_sum / weights_sum),
+					(byte) (weights_sum == 0 ? 0 : green_sum / weights_sum),
+					(byte) (weights_sum == 0 ? 0 : red_sum / weights_sum),
+					(byte) (weights_sum == 0 ? 0 : alpha_sum / weights_sum));
+			}
+		}
 
-				if (waSum == 0 || wcSum == 0) {
-					dst_row[rect.Left] = ColorBgra.Zero;
-				} else {
-					byte alpha = (byte) (aSum / waSum);
-					byte blue = (byte) (bSum / wcSum);
-					byte green = (byte) (gSum / wcSum);
-					byte red = (byte) (rSum / wcSum);
+		Pinta.Core.ColorBgra[] color_buffer = new Pinta.Core.ColorBgra[src_width];
 
-					dst_row[rect.Left] = ColorBgra.FromBgra (blue, green, red, alpha).ToPremultipliedAlpha ();
+		// Blur horizontally
+		for (int y = 0; y < src_height; y++) {
+			for (int x = 0; x < src_width; x++) {
+				long red_sum = 0;
+				long green_sum = 0;
+				long blue_sum = 0;
+				long alpha_sum = 0;
+				long weights_sum = 0;
+
+				color_buffer[x] = output_data[y * src_width + x];
+
+				for (int i = 0; i < radius; i++) {
+					int pos = x - radius + i;
+					if (pos < 0 || pos >= src_width) { continue; }
+
+
+					red_sum += weights[i] * (long) color_buffer[pos].R;
+					green_sum += weights[i] * (long) color_buffer[pos].G;
+					blue_sum += weights[i] * (long) color_buffer[pos].B;
+					alpha_sum += weights[i] * (long) color_buffer[pos].A;
+					weights_sum += (long) weights[i];
+				}
+				// Pixels ahead (don't need to use the buffer)
+				for (int i = radius; i < weights_length; i++) {
+					int pos = x - radius + i;
+					if (pos < 0 || pos >= src_width) { continue; }
+
+					var pixel = output_data[y * src_width + pos];
+
+
+					red_sum += weights[i] * (long) pixel.R;
+					green_sum += weights[i] * (long) pixel.G;
+					blue_sum += weights[i] * (long) pixel.B;
+					alpha_sum += weights[i] * (long) pixel.A;
+					weights_sum += (long) weights[i];
 				}
 
-				for (int x = rect.Left + 1; x <= rect.Right; ++x) {
-					for (int i = 0; i < wlen - 1; ++i) {
-						waSums[i] = waSums[i + 1];
-						wcSums[i] = wcSums[i + 1];
-						aSums[i] = aSums[i + 1];
-						bSums[i] = bSums[i + 1];
-						gSums[i] = gSums[i + 1];
-						rSums[i] = rSums[i + 1];
-					}
-
-					waSum = 0;
-					wcSum = 0;
-					aSum = 0;
-					bSum = 0;
-					gSum = 0;
-					rSum = 0;
-
-					int wx;
-					for (wx = 0; wx < wlen - 1; ++wx) {
-						long wwx = w[wx];
-						waSum += wwx * waSums[wx];
-						wcSum += wwx * wcSums[wx];
-						aSum += wwx * aSums[wx];
-						bSum += wwx * bSums[wx];
-						gSum += wwx * gSums[wx];
-						rSum += wwx * rSums[wx];
-					}
-
-					wx = wlen - 1;
-
-					waSums[wx] = 0;
-					wcSums[wx] = 0;
-					aSums[wx] = 0;
-					bSums[wx] = 0;
-					gSums[wx] = 0;
-					rSums[wx] = 0;
-
-					int srcX = x + wx - r;
-
-					if (srcX >= 0 && srcX < src_width) {
-						for (int wy = 0; wy < wlen; ++wy) {
-							int srcY = y + wy - r;
-
-							if (srcY < 0 || srcY >= src_height)
-								continue;
-
-							ColorBgra c = src.GetColorBgra (src_data, src_width, new (srcX, srcY)).ToStraightAlpha ();
-							int wp = w[wy];
-
-							waSums[wx] += wp;
-							wp *= c.A + (c.A >> 7);
-							wcSums[wx] += wp;
-							wp >>= 8;
-
-							if (c.A > 0) {
-								aSums[wx] += wp * (long) c.A;
-								bSums[wx] += wp * (long) c.B;
-								gSums[wx] += wp * (long) c.G;
-								rSums[wx] += wp * (long) c.R;
-							}
-						}
-
-						int wr = w[wx];
-						waSum += wr * waSums[wx];
-						wcSum += wr * wcSums[wx];
-						aSum += wr * aSums[wx];
-						bSum += wr * bSums[wx];
-						gSum += wr * gSums[wx];
-						rSum += wr * rSums[wx];
-					}
-
-					wcSum >>= 8;
-
-					if (waSum == 0 || wcSum == 0) {
-						dst_row[x] = ColorBgra.Zero;
-					} else {
-						byte alpha = (byte) (aSum / waSum);
-						byte blue = (byte) (bSum / wcSum);
-						byte green = (byte) (gSum / wcSum);
-						byte red = (byte) (rSum / wcSum);
-
-						dst_row[x] = ColorBgra.FromBgra (blue, green, red, alpha).ToPremultipliedAlpha ();
-					}
-				}
+				output_data[y * src_width + x] = ColorBgra.FromBgra (
+					(byte) (weights_sum == 0 ? 0 : blue_sum / weights_sum),
+					(byte) (weights_sum == 0 ? 0 : green_sum / weights_sum),
+					(byte) (weights_sum == 0 ? 0 : red_sum / weights_sum),
+					(byte) (weights_sum == 0 ? 0 : alpha_sum / weights_sum));
 			}
 		}
 	}
